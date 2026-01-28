@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Line Balancing Game (Free / Open Source)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 18px; line-height: 1.35; }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    label { font-size: 13px; color: #333; }
+    input, select, button { font-size: 14px; padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; }
+    button { cursor: pointer; border: 1px solid #bbb; background: #f7f7f7; }
+    button.primary { background: #111; color: #fff; border-color: #111; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; vertical-align: top; }
+    th { font-size: 13px; color: #444; }
+    .small { font-size: 13px; color: #555; }
+    .pill { display:inline-block; padding: 2px 8px; border:1px solid #ddd; border-radius: 999px; font-size: 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .warn { color: #8a2; }
+    .bad  { color: #b22; }
+    .good { color: #080; }
+  </style>
+</head>
+<body>
+  <h1>Line Balancing Game: Balance the Line (Throughput vs Labor Cost)</h1>
+  <div class="small">Goal: Assign tasks to stations. The slowest station determines the line’s cycle time. More stations cost more.</div>
+
+  <div class="grid" style="margin-top:12px;">
+    <div class="card">
+      <h2 style="margin:0 0 8px;font-size:16px;">1) Configure the scenario</h2>
+      <div class="row">
+        <label>Revenue per finished unit ($)
+          <input id="rev" type="number" value="5" min="0" step="1">
+        </label>
+        <label>Wage per station ($)
+          <input id="wage" type="number" value="10" min="0" step="1">
+        </label>
+        <label>Run time (seconds)
+          <input id="runtime" type="number" value="120" min="10" step="10">
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="reset" title="Reset stations and scores">Reset</button>
+        <button id="example" title="Auto-fill a reasonable starting layout">Load Example Layout</button>
+        <button class="primary" id="simulate">Simulate</button>
+      </div>
+      <div class="small" style="margin-top:10px;">
+        <span class="pill">How it works</span>
+        <div style="margin-top:6px;">
+          Cycle time = <b>max station time</b>. Units produced ≈ floor(runtime / cycle time).<br>
+          If you add stations but don’t reduce the slowest station time, output won’t improve.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 8px;font-size:16px;">2) Tasks (editable)</h2>
+      <div class="small">You can change task times (seconds). Keep it simple (4–8 tasks).</div>
+      <table id="tasksTbl"></table>
+      <div class="row" style="margin-top:10px;">
+        <button id="addTask">Add Task</button>
+        <button id="removeTask">Remove Last Task</button>
+      </div>
+      <div class="small" style="margin-top:10px;">
+        Precedence is assumed to be in listed order (Task 1 → Task 2 → …). Students balance by grouping tasks into stations.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px;">
+    <h2 style="margin:0 0 8px;font-size:16px;">3) Assign tasks to stations</h2>
+    <div class="small">For each station, choose which tasks it performs (in order). Add/remove stations as needed.</div>
+    <div class="row" style="margin-top:10px;">
+      <button id="addStation">Add Station</button>
+      <button id="removeStation">Remove Last Station</button>
+    </div>
+    <div id="stations" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card" style="margin-top:14px;">
+    <h2 style="margin:0 0 8px;font-size:16px;">Results</h2>
+    <div id="results" class="small">Run a simulation to see throughput, bottleneck, and profit.</div>
+  </div>
+
+<script>
+  // ------- Model -------
+  let tasks = [
+    { name: "Cut", time: 5 },
+    { name: "Write code", time: 10 },
+    { name: "Draw box", time: 7 },
+    { name: "Sign", time: 4 }
+  ];
+  let stations = [
+    { selected: [0] },
+    { selected: [1] },
+    { selected: [2,3] }
+  ];
+
+  // ------- Helpers -------
+  const el = (id) => document.getElementById(id);
+  const clampInt = (v, d=0) => Number.isFinite(+v) ? Math.max(0, Math.floor(+v)) : d;
+
+  function renderTasks() {
+    const tbl = el("tasksTbl");
+    tbl.innerHTML = `
+      <tr><th>#</th><th>Task</th><th>Time (sec)</th></tr>
+      ${tasks.map((t, i) => `
+        <tr>
+          <td class="mono">${i+1}</td>
+          <td><input value="${t.name}" data-i="${i}" data-k="name" style="width: 95%"></td>
+          <td><input type="number" min="1" step="1" value="${t.time}" data-i="${i}" data-k="time" style="width: 90px"></td>
+        </tr>
+      `).join("")}
+    `;
+    tbl.querySelectorAll("input").forEach(inp => {
+      inp.addEventListener("input", () => {
+        const i = +inp.dataset.i;
+        const k = inp.dataset.k;
+        if (k === "name") tasks[i].name = inp.value;
+        if (k === "time") tasks[i].time = Math.max(1, clampInt(inp.value, tasks[i].time));
+        renderStations(); // update labels/times
+      });
+    });
+  }
+
+  function stationTime(st) {
+    return st.selected.reduce((sum, idx) => sum + (tasks[idx]?.time ?? 0), 0);
+  }
+
+  function renderStations() {
+    const wrap = el("stations");
+    wrap.innerHTML = stations.map((st, sIdx) => {
+      const options = tasks.map((t, i) => {
+        const sel = st.selected.includes(i) ? "selected" : "";
+        return `<option value="${i}" ${sel}>${i+1}. ${t.name} (${t.time}s)</option>`;
+      }).join("");
+      const stTime = stationTime(st);
+      return `
+        <div class="card" style="margin-top:10px;">
+          <div class="row" style="justify-content:space-between;">
+            <div><b>Station ${sIdx+1}</b> <span class="pill">time: ${stTime}s</span></div>
+            <div class="small">Select tasks for this station (Ctrl/Cmd-click multi-select)</div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <select multiple size="${Math.min(8, Math.max(4, tasks.length))}" data-s="${sIdx}" style="min-width: 320px;">
+              ${options}
+            </select>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    wrap.querySelectorAll("select").forEach(sel => {
+      sel.addEventListener("change", () => {
+        const s = +sel.dataset.s;
+        const chosen = Array.from(sel.selectedOptions).map(o => +o.value).sort((a,b)=>a-b);
+        stations[s].selected = chosen;
+        renderStations();
+      });
+    });
+  }
+
+  function validateAssignments() {
+    // Ensure each task assigned exactly once (simple pedagogical constraint)
+    const seen = new Array(tasks.length).fill(0);
+    stations.forEach(st => st.selected.forEach(i => { if (i >= 0 && i < tasks.length) seen[i]++; }));
+    const missing = seen.map((c,i)=>c===0? i : null).filter(v=>v!==null);
+    const dup = seen.map((c,i)=>c>1? i : null).filter(v=>v!==null);
+    return { ok: missing.length===0 && dup.length===0, missing, dup, seen };
+  }
+
+  function simulate() {
+    const revenue = clampInt(el("rev").value, 5);
+    const wage = clampInt(el("wage").value, 10);
+    const runtime = Math.max(10, clampInt(el("runtime").value, 120));
+
+    const v = validateAssignments();
+    const assignedStations = stations.length;
+
+    if (!v.ok) {
+      const missingTxt = v.missing.length ? `Missing tasks: ${v.missing.map(i=>i+1).join(", ")}` : "";
+      const dupTxt = v.dup.length ? `Duplicated tasks: ${v.dup.map(i=>i+1).join(", ")}` : "";
+      el("results").innerHTML = `
+        <div class="bad"><b>Fix assignments first.</b> Each task must be assigned to exactly one station.</div>
+        <div class="small">${missingTxt}${missingTxt && dupTxt ? " | " : ""}${dupTxt}</div>
+      `;
+      return;
+    }
+
+    const times = stations.map(st => stationTime(st));
+    const cycle = Math.max(...times);
+    const units = Math.floor(runtime / cycle);
+    const laborCost = assignedStations * wage;
+    const totalRevenue = units * revenue;
+    const profit = totalRevenue - laborCost;
+
+    const bottleneckIdx = times.indexOf(cycle);
+    const totalWork = tasks.reduce((s,t)=>s+t.time,0);
+    const idlePerCycle = assignedStations * cycle - totalWork; // classic line balancing idle per cycle
+
+    const profitCls = profit >= 0 ? "good" : "bad";
+    const idleCls = idlePerCycle <= cycle ? "good" : "warn";
+
+    el("results").innerHTML = `
+      <div class="row" style="gap:18px;">
+        <div><b>Cycle time:</b> <span class="mono">${cycle}s</span></div>
+        <div><b>Units produced:</b> <span class="mono">${units}</span></div>
+        <div><b>Stations:</b> <span class="mono">${assignedStations}</span></div>
+      </div>
+      <div class="row" style="gap:18px; margin-top:8px;">
+        <div><b>Total revenue:</b> <span class="mono">$${totalRevenue}</span></div>
+        <div><b>Labor cost:</b> <span class="mono">$${laborCost}</span></div>
+        <div><b>Profit:</b> <span class="mono ${profitCls}">$${profit}</span></div>
+      </div>
+      <div style="margin-top:10px;">
+        <b>Bottleneck station:</b> Station ${bottleneckIdx+1} (time ${cycle}s)
+      </div>
+      <div style="margin-top:6px;">
+        <b>Idle time per cycle (line loss):</b> <span class="mono ${idleCls}">${idlePerCycle}s</span>
+        <span class="small"> (= stations×cycle − total task time)</span>
+      </div>
+      <div class="small" style="margin-top:10px;">
+        <b>Interpretation:</b> If you want more units, you must reduce the bottleneck station time (rebalance tasks or add a station that actually reduces the max time).
+      </div>
+    `;
+  }
+
+  // ------- Buttons -------
+  el("reset").addEventListener("click", () => {
+    tasks = [
+      { name: "Cut", time: 5 },
+      { name: "Write code", time: 10 },
+      { name: "Draw box", time: 7 },
+      { name: "Sign", time: 4 }
+    ];
+    stations = [
+      { selected: [0] },
+      { selected: [1] },
+      { selected: [2,3] }
+    ];
+    renderTasks(); renderStations();
+    el("results").textContent = "Run a simulation to see throughput, bottleneck, and profit.";
+  });
+
+  el("example").addEventListener("click", () => {
+    // A balanced-ish example for the default tasks:
+    // Station 1: Cut + Sign = 9s
+    // Station 2: Draw box = 7s
+    // Station 3: Write code = 10s (bottleneck 10)
+    stations = [
+      { selected: [0,3] },
+      { selected: [2] },
+      { selected: [1] }
+    ];
+    renderStations();
+  });
+
+  el("simulate").addEventListener("click", simulate);
+
+  el("addTask").addEventListener("click", () => {
+    tasks.push({ name: `Task ${tasks.length+1}`, time: 5 });
+    renderTasks(); renderStations();
+  });
+
+  el("removeTask").addEventListener("click", () => {
+    if (tasks.length <= 2) return;
+    tasks.pop();
+    // remove references to deleted task index
+    stations.forEach(st => st.selected = st.selected.filter(i => i < tasks.length));
+    renderTasks(); renderStations();
+  });
+
+  el("addStation").addEventListener("click", () => {
+    stations.push({ selected: [] });
+    renderStations();
+  });
+
+  el("removeStation").addEventListener("click", () => {
+    if (stations.length <= 1) return;
+    stations.pop();
+    renderStations();
+  });
+
+  // ------- Init -------
+  renderTasks();
+  renderStations();
+</script>
+</body>
+</html>
